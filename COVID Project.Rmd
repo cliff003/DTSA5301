@@ -1,0 +1,264 @@
+---
+title: "COVID project"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+date: "2023-02-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Include the required libraries
+```{r library}
+library(tidyverse)
+library(lubridate)
+```
+
+# Importing data
+
+The present study entails the acquisition of COVID-19 data from a reliable and reputable source. 
+
+```{r import}
+# Record urls
+urls <- c('https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_US.csv', 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_US.csv', 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv', 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv')
+uid_lookup_url <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+
+# Import 4 csvs
+US_cases <- read.csv(urls[1])
+US_deaths <- read.csv(urls[2])
+global_cases <- read.csv(urls[3])
+global_deaths <- read.csv(urls[4])
+
+# Import population data
+uid <- read.csv(uid_lookup_url) %>%
+  select(c(Province_State, Country_Region, Population)) %>%
+  mutate_all(~na_if(., ''))
+```
+
+# Tidying and transforming data
+
+Tidy and transform imported data, create new columns for analysis.
+
+
+
+```{r tidy}
+
+# Create a data frame for global cases
+global_cases <- global_cases %>%
+  # Remove some columns
+  select(-c(Lat, Long)) %>%
+  # show date and cases in 2 columns
+  pivot_longer(cols = -c(Province.State, 
+                        Country.Region),
+               names_to = "date",
+               values_to = "cases")
+
+# Create a data frame for global deaths
+global_deaths <- global_deaths %>%
+  select(-c(Lat, Long)) %>%
+  pivot_longer(cols = -c(Province.State, 
+                        Country.Region),
+               names_to = "date",
+               values_to = "deaths")
+
+# Join global_cases and global_deaths to create final global data frame
+global <- global_cases %>%
+  full_join(global_deaths) %>%
+  # Change date in correct format
+  transform(date = gsub("X","",as.character(date))) %>%
+  # Transform date from character to date object
+  mutate(date = mdy(date)) %>%
+  # Change all blank data to NA
+  mutate_all(~na_if(., '')) %>%
+  # Create a Combined_Key column
+  unite("Combined_Key",
+        c(Province.State, Country.Region),
+        sep = ", ",
+        na.rm = TRUE,
+        remove = FALSE) %>%
+  rename(Country_Region = Country.Region,
+         Province_State = Province.State) %>%
+  # Join population data to the data frame
+  left_join(uid, by = c("Province_State", "Country_Region")) %>%
+  # Select columns for analysis
+  select(Province_State, Country_Region, date, 
+         cases, deaths, Population, Combined_Key)
+
+# Create a data frame for US cases
+US_cases <- US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  select(Admin2:cases) %>%
+  select(-c(Lat, Long_))
+
+# Create a data frame for US deaths
+US_deaths <- US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  select(Admin2:deaths) %>%
+  select(-c(Lat, Long_))
+
+# Join US_cases and US_deaths to create final US data frame
+US <- US_cases %>%
+  full_join(US_deaths) %>%
+  transform(date = gsub("X","",as.character(date))) %>%
+  mutate(date = mdy(date))
+
+# Show summary for global data
+summary(global)
+
+# Show summary for US data
+summary(US)
+```
+# Data Analysis
+
+## Canada data analysis
+
+Retrieve Canadian data by extracting it from the global data set.
+
+```{r analysis_Canada1}
+# Extract Canada data from global data
+Canada <- global %>%
+  filter(Country_Region == "Canada")
+
+# Group Canada data by province
+Canada_by_province <- Canada %>%
+  group_by(Province_State, Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  ungroup()
+
+# Calculate Canada's national data
+Canada_totals <- Canada_by_province %>%
+  group_by(Country_Region, date) %>%
+  summarize(cases = sum(cases), deaths = sum(deaths),
+            Population = sum(Population,  na.rm = TRUE)) %>%
+  mutate(deaths_per_mill = deaths * 1000000 / Population) %>%
+  ungroup()
+
+# Plot a log-scale line graph that displays the cumulative COVID-19 cases and deaths in Canada over time
+Canada_totals %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+         axis.text.x = element_text(angle = 90)) +
+  labs(title = "COVID19 in Canada", y = NULL)
+```
+The presented graph illustrates the trend of cumulative COVID-19 cases and related fatalities in Canada. The recorded cases begin from February 2020 and exhibit a sharp upward trajectory before stabilizing at a plateau.
+
+## Canadian province analysis
+
+The process of extracting provincial data from the national dataset is undertaken, followed by the development of a function for generating a graph of the number of COVID-19 cases over time for each province.
+```{r analysis_province}
+# Create a function to plot a graph for Province
+plot_province <- function(province) {
+  Canada_by_province %>%
+  filter(Province_State == province) %>%
+  filter(cases > 0) %>%
+  ggplot(aes(x = date, y = cases)) +
+  geom_line(aes(color = "cases")) +
+  geom_point(aes(color = "cases")) +
+  geom_line(aes(y = deaths, color = "deaths")) +
+  geom_point(aes(y = deaths, color = "deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+         axis.text.x = element_text(angle = 90)) +
+  labs(title = str_c("COVID19 in ", province), y = NULL)
+}
+
+# Plot a graph for Ontario
+plot_province("Ontario")
+
+# Plot a graph for British Columbia
+plot_province("British Columbia")
+```
+
+The initial graph demonstrates the progression of COVID-19 cases in Ontario, while the subsequent graph displays the same for British Columbia. Although both graphs exhibit comparable trends to the national trend, minor variations exist within the first year of data.
+
+## New cases analysis
+
+A calculation of new COVID-19 cases was performed for the Canadian data set, with the results tabulated on a monthly basis.
+```{r analysis_Canada2}
+
+Canada_totals %>%
+  # Extract year and month part from date
+  mutate(year_month = format_ISO8601(date, precision = "ym")) %>%
+  # Calculate new cases and deaths 
+  mutate(new_cases = cases - lag(cases),
+      new_deaths = deaths - lag(deaths)) %>%
+  # Group the data by month 
+  group_by(year_month) %>%
+  summarize(new_cases = sum(new_cases), new_deaths = sum(new_deaths)) %>%
+  ungroup() %>%
+  # Plot a line graph with log-scale y-axis.
+  ggplot(aes(x = year_month, y = new_cases)) +
+  geom_line(aes(color = "new_cases", group = 1)) +
+  geom_point(aes(color = "new_cases")) +
+  geom_line(aes(y = new_deaths, color = "new_deaths", group = 1)) +
+  geom_point(aes(y = new_deaths, color = "new_deaths")) +
+  scale_y_log10() +
+  theme(legend.position = "bottom",
+         axis.text.x = element_text(angle = 90)) +
+  labs(title = "New COVID19 cases in Canada", y = NULL)
+```
+
+The graph displays the monthly new COVID-19 cases starting from February 2020, revealing a pronounced surge during the winter months and a decline during the summer months. The trend stabilized towards the end of 2022 and started to decrease gradually.
+
+## Global trend
+
+To predict a linear model for deaths per thousand and cases per thousand, we calculated these values for each region in the data.
+
+```{r analysis_linear1}
+# Create data for every region in global data
+global_total <- global %>%
+  group_by(Combined_Key) %>%
+  # Calculate deaths per thousand and cases per thousand
+  summarize(deaths = max(deaths), cases = max(cases),
+           Population = max(Population),
+           cases_per_thou = 1000 * cases / Population,
+           deaths_per_thou = 1000 * deaths / Population) %>%
+  filter(cases > 0, Population > 0)
+
+# Create a linear model
+mod <- lm(deaths_per_thou ~ cases_per_thou, data = global_total)
+
+# Show summary of the model
+summary(mod)
+
+```
+
+Utilize the linear model generated to forecast deaths per thousand based on cases per thousand, subsequently comparing the results with the actual values.
+```{r analysis_linear2}
+# Predict data using model
+global_total_w_pred <- global_total %>% mutate(pred = predict(mod))
+
+# Plot the graph
+global_total_w_pred %>% ggplot() +
+  geom_point(aes(x = cases_per_thou, y = deaths_per_thou, color = "actual")) +
+  geom_point(aes(x = cases_per_thou, y = pred, color = "predicted")) +
+  theme(legend.position = "bottom")
+```
+The graph illustrates a correlation between deaths per thousand and cases per thousand, exhibiting a near-linear pattern.
+
+## Summary
+The report presents an analysis of COVID-19 data for Canada, including trends in cumulative cases and fatalities for the country and its provinces. The analysis includes a calculation of new cases on a monthly basis, demonstrating a surge during the winter months and a decline during the summer months. Additionally, the report examines the global trend and predicts a linear model for deaths per thousand based on cases per thousand, finding a correlation between the two.
+
+# Bias Identification
+
+Using a single data source in the report may limit its ability to capture a comprehensive picture of the COVID-19 situation and result in potential bias. The report also lacks mention of any limitations or sources of error in the data or analysis; and fails to thoroughly examine the geographic location and demographic variables, which may impact the pandemic's patterns and trends. Addressing these shortcomings is necessary for ensuring the report's validity and credibility.
+
+
+```{r}
+sessionInfo()
+```
